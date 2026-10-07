@@ -7,6 +7,8 @@
 		"dev": "vite",
 		"build": "tsc --noEmit && vite build",
 		"typecheck": "tsc --noEmit",
+		"test": "tsx --test tools/tests/*.test.ts",
+		"probe:collision": "tsx tools/probeCollision.ts",
 		"probe": "tsx tools/probe.ts",
 		"spawns": "tsx tools/buildSpawns.ts",
 		"regions": "tsx tools/buildRegions.ts",

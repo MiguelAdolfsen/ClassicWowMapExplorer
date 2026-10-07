@@ -1,5 +1,6 @@
 import { BufferAttribute, BufferGeometry } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { buildCollision, type CollisionData } from './collision';
 import type { CascStorage } from '../casc/storage';
 import { chunks } from '../formats/chunks';
 import { Blend, M2_MATERIAL_TWO_SIDED, M2_MATERIAL_UNFOGGED, M2_MATERIAL_UNLIT, parseM2, parseSkin, type M2File, type M2Skin } from '../formats/m2';
@@ -71,6 +72,8 @@ export interface ModelData {
 	/** WMOs: per-vertex baked interior light (linear RGB) and how much to use it (A), or null. */
 	baked: Float32Array | null;
 	indices: Uint32Array;
+	/** M2 solid geometry, separate from visual leaves, effects and skin geometry. */
+	collision?: CollisionData | null;
 	batches: ModelBatch[];
 	/** Bounding radius in model units, for view-distance culling. */
 	radius: number;
@@ -441,6 +444,7 @@ export async function loadM2(storage: CascStorage, fdid: number, options: M2Opti
 	})));
 	return {
 		fdid, positions, normals, uvs, baked: null, indices: packed.indices, batches: mergeBatches(packed.batches),
+		collision: buildCollision(prepared.m2.collision),
 		radius: prepared.m2.bounds.radius || boundingRadius(positions), height: topOf(positions, packed.indices, packed.batches),
 		// The bone data is shared by every look of this model, so it's keyed for reuse on the GPU.
 		animation: anim && boneIndex && boneWeight

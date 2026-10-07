@@ -12,6 +12,7 @@ import { useShadows, type ShadowRole } from './shadows';
 import { liquidMaterial, liquidTime } from './terrainMaterials';
 import { FOOTSTEP_RANGE } from './footsteps';
 import { TextureCache } from './textureCache';
+import { PropCollision } from './propCollision';
 
 /** Yards above a creature's head its name sits. */
 const NAME_CLEARANCE = 0.35;
@@ -61,6 +62,7 @@ class ModelEntry {
 	data: ModelData | null = null;
 	mesh: THREE.InstancedMesh | null = null;
 	geometry: THREE.BufferGeometry | null = null;
+	collision: PropCollision | null = null;
 	materials: THREE.Material[] = [];
 	/** For GPU-skinned models: the shadow pass's material, skinned the same way. */
 	depthMaterial: THREE.Material | null = null;
@@ -155,7 +157,7 @@ export class ObjectManager {
 	 * model's first frame doesn't stall on shader compilation; shadowPass for depth materials.
 	 */
 	constructor(
-		private readonly storage: AsyncStorageApi,
+		private readonly storage: Pick<AsyncStorageApi, 'loadTileObjects' | 'loadModels' | 'loadTextures'>,
 		compressed: boolean,
 		anisotropy: number,
 		private readonly prepare: (object: THREE.Object3D, shadowPass?: boolean) => Promise<void>,
@@ -507,7 +509,7 @@ export class ObjectManager {
 
 	private async build(entry: ModelEntry, data: ModelData | null): Promise<void> {
 		// Some models are only their particles (instance portals: a hidden quad and the swirl).
-		if (!data || (data.batches.length === 0 && !data.emitters?.length)) {
+		if (!data || (data.batches.length === 0 && !data.emitters?.length && !data.collision)) {
 			entry.state = 'failed';
 			return;
 		}
@@ -545,7 +547,7 @@ export class ObjectManager {
 		entry.materials = batches.map((b, i) => {
 			geometry.addGroup(b.start, b.count, i);
 			const material = createModelMaterial(b.material, textures.get(b.material.texture) ?? null, !!data.baked, skin);
-			// Buildings are what the camera collides with (see sweep); doodads aren't solid.
+			// Building slopes use their render geometry; props have a separate solid mesh.
 			if (entry.kind === 'wmo') applyWalkable(material);
 			return material;
 		});
@@ -580,8 +582,9 @@ export class ObjectManager {
 		}
 		await Promise.all(warming);
 		entry.geometry = geometry;
+		if (entry.kind !== 'creature' && data.collision) entry.collision = new PropCollision(data.collision);
 		entry.radius = data.radius;
-		entry.data = { ...data, positions: new Float32Array(0), normals: new Float32Array(0), uvs: new Float32Array(0), baked: null, indices: new Uint32Array(0), liquids: [], animation: undefined };
+		entry.data = { ...data, positions: new Float32Array(0), normals: new Float32Array(0), uvs: new Float32Array(0), baked: null, indices: new Uint32Array(0), liquids: [], animation: undefined, collision: null };
 		entry.state = 'ready';
 		entry.dirty = true;
 		for (const fn of entry.onReady.splice(0)) fn(entry);
@@ -765,6 +768,7 @@ export class ObjectManager {
 			entry.mesh.dispose();
 		}
 		entry.geometry?.dispose();
+		entry.collision?.dispose();
 		for (const m of entry.materials) m.dispose();
 		entry.depthMaterial?.dispose();
 		for (const l of entry.liquids) {
@@ -810,37 +814,33 @@ export class ObjectManager {
 		return out;
 	}
 
-	private readonly sightRay = new THREE.Raycaster();
-
-	/** Whether a building (any model with a BVH) blocks the straight line between two points. */
+	/** Whether loaded solid geometry blocks the straight line between two points. */
 	blocksSight(from: THREE.Vector3, to: THREE.Vector3): boolean {
 		const direction = to.clone().sub(from);
 		const distance = direction.length();
 		if (distance < 1e-3) return false;
-		this.sightRay.set(from, direction.divideScalar(distance));
-		// Stop just short of the target so its own surroundings (a doorway, the floor) don't count.
-		this.sightRay.far = distance - 0.5;
-		this.sightRay.firstHitOnly = true;
-		for (const entry of this.models.values()) {
-			if (!entry.mesh?.visible || !entry.geometry?.boundsTree) continue;
-			if (this.sightRay.intersectObject(entry.mesh, false).length) return true;
-		}
-		return false;
+		return this.castSolid(from, direction.divideScalar(distance), Math.max(0, distance - 0.5)) !== null;
 	}
 
 	private readonly sweepRay = new THREE.Raycaster();
 	private readonly hitNormal = new THREE.Vector3();
 
 	/**
-	 * Nearest building surface along a ray (within far), with its world-space normal and the
-	 * TerrainType it's made of (0 unknown): floors under the walking character, walls behind its camera.
+	 * Nearest loaded solid surface along a ray, with its world-space normal and TerrainType
+	 * (0 unknown): floors under the walking character, walls and props behind its camera.
 	 */
-	castBuildings(from: THREE.Vector3, direction: THREE.Vector3, far: number): { distance: number; normal: THREE.Vector3; ground: number } | null {
+	castSolid(from: THREE.Vector3, direction: THREE.Vector3, far: number): { distance: number; normal: THREE.Vector3; ground: number } | null {
 		this.sweepRay.set(from, direction);
 		this.sweepRay.far = far;
 		this.sweepRay.firstHitOnly = true;
 		let best: { distance: number; normal: THREE.Vector3; ground: number } | null = null;
 		for (const entry of this.models.values()) {
+			if (entry.collision) {
+				for (const matrix of entry.instances.values()) {
+					const hit = entry.collision.cast(matrix, from, direction, best?.distance ?? far);
+					if (hit && (!best || hit.distance < best.distance)) best = hit;
+				}
+			}
 			if (!entry.mesh?.visible || !entry.geometry?.boundsTree) continue;
 			const hit = this.sweepRay.intersectObject(entry.mesh, false)[0];
 			if (!hit?.face || (best && hit.distance >= best.distance)) continue;
@@ -854,7 +854,7 @@ export class ObjectManager {
 	}
 
 	/**
-	 * Limits a camera move so it can't pass through buildings (caves, mines, walls): slides along
+	 * Limits a camera move so it can't pass through solid buildings and props: slides along
 	 * a surface it would cross, keeping `radius` away from it. Returns the allowed move.
 	 */
 	sweep(from: THREE.Vector3, move: THREE.Vector3, radius: number): THREE.Vector3 {
@@ -863,7 +863,16 @@ export class ObjectManager {
 			const length = allowed.length();
 			if (length < 1e-5) break;
 			const direction = allowed.clone().divideScalar(length);
-			const hit = this.castBuildings(from, direction, length + radius);
+			let hit = this.castSolid(from, direction, length + radius);
+			for (const entry of this.models.values()) {
+				if (!entry.collision) continue;
+				for (const matrix of entry.instances.values()) {
+					const contact = entry.collision.sweep(matrix, from, allowed, radius);
+					if (contact && (!hit || contact.distance + radius < hit.distance)) {
+						hit = { ...contact, distance: contact.distance + radius };
+					}
+				}
+			}
 			if (!hit) break;
 			// Facing away from the move (we're behind it): not a wall for this move.
 			const into = allowed.dot(hit.normal);
@@ -879,9 +888,12 @@ export class ObjectManager {
 		return allowed;
 	}
 
-	/** Whether any building's bounds come within `margin` of a point: collision is only needed then. */
-	nearBuilding(at: THREE.Vector3, margin: number): boolean {
+	/** Whether loaded solid bounds come within `margin` of a point. */
+	nearSolid(at: THREE.Vector3, margin: number): boolean {
 		for (const entry of this.models.values()) {
+			if (entry.collision) {
+				for (const matrix of entry.instances.values()) if (entry.collision.near(matrix, at, margin)) return true;
+			}
 			const sphere = entry.geometry?.boundingSphere;
 			if (!entry.mesh?.visible || !entry.geometry?.boundsTree || !sphere) continue;
 			for (const key of entry.visible) {
@@ -951,7 +963,7 @@ export class ObjectManager {
 	pushOut(at: THREE.Vector3, radius: number, horizontal = false): THREE.Vector3 {
 		const offset = new THREE.Vector3();
 		for (const axis of horizontal ? ObjectManager.AXES.slice(2) : ObjectManager.AXES) {
-			const hit = this.castBuildings(at, axis, radius);
+			const hit = this.castSolid(at, axis, radius);
 			if (hit && axis.dot(hit.normal) < 0) offset.addScaledVector(axis, -(radius - hit.distance));
 		}
 		return offset;

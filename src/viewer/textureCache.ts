@@ -15,7 +15,7 @@ export class TextureCache {
 	private readonly entries = new Map<number, Entry>();
 
 	constructor(
-		private readonly storage: AsyncStorageApi,
+		private readonly storage: Pick<AsyncStorageApi, 'loadTextures'>,
 		private readonly compressed: boolean,
 		private readonly anisotropy: number,
 	) {}

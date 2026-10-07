@@ -45,6 +45,13 @@ export interface M2File {
 	uvScroll: ([number, number] | null)[];
 	skinFdids: number[];
 	bounds: { min: [number, number, number]; max: [number, number, number]; radius: number };
+	collision: M2Collision | null;
+}
+
+export interface M2Collision {
+	/** Dedicated solid geometry in the model's original z-up coordinates. */
+	positions: Float32Array;
+	indices: Uint32Array;
 }
 
 export interface M2Batch {
@@ -93,13 +100,17 @@ function firstTrackValue(view: DataView, base: number, track: number, read: (at:
 export function parseM2(bytes: Uint8Array): M2File {
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	let md20 = -1;
+	let md20End = bytes.length;
 	let skinFdids: number[] = [];
 	let textureFdids: number[] = [];
 	for (let p = 0; p + 8 <= bytes.length;) {
 		const id = decoder.decode(bytes.subarray(p, p + 4));
 		const size = view.getUint32(p + 4, true);
 		const data = p + 8;
-		if (id === 'MD21') md20 = data;
+		if (id === 'MD21') {
+			md20 = data;
+			md20End = data + size;
+		}
 		else if (id === 'SFID') skinFdids = Array.from({ length: size / 4 }, (_, i) => view.getUint32(data + i * 4, true));
 		else if (id === 'TXID') textureFdids = Array.from({ length: size / 4 }, (_, i) => view.getUint32(data + i * 4, true));
 		p = data + size;
@@ -177,7 +188,32 @@ export function parseM2(bytes: Uint8Array): M2File {
 		uvScroll,
 		skinFdids: skinFdids.slice(0, Math.max(1, skinCount)),
 		bounds: { min: [f(0xa0), f(0xa4), f(0xa8)], max: [f(0xac), f(0xb0), f(0xb4)], radius: f(0xb8) },
+		collision: readCollision(view, b, md20End),
 	};
+}
+
+function readCollision(view: DataView, base: number, end: number): M2Collision | null {
+	if (base + 0xf0 > end || end > view.byteLength) throw new Error('Truncated M2 collision header');
+	const triangles = arr(view, base, 0xd8);
+	const vertices = arr(view, base, 0xe0);
+	if (triangles.count === 0) return null;
+	if (triangles.count % 3 || vertices.count === 0) throw new Error('Invalid M2 collision counts');
+	const fits = (a: { count: number; offset: number }, stride: number) =>
+		a.offset >= 0xf0 && base + a.offset + a.count * stride <= end;
+	if (!fits(triangles, 2) || !fits(vertices, 12)) throw new Error('M2 collision array exceeds model data');
+	const positions = new Float32Array(vertices.count * 3);
+	for (let i = 0; i < positions.length; i++) {
+		const value = view.getFloat32(base + vertices.offset + i * 4, true);
+		if (!Number.isFinite(value)) throw new Error('Non-finite M2 collision vertex');
+		positions[i] = value;
+	}
+	const indices = new Uint32Array(triangles.count);
+	for (let i = 0; i < indices.length; i++) {
+		const index = view.getUint16(base + triangles.offset + i * 2, true);
+		if (index >= vertices.count) throw new Error('M2 collision index exceeds vertex count');
+		indices[i] = index;
+	}
+	return { positions, indices };
 }
 
 export function parseSkin(bytes: Uint8Array): M2Skin {

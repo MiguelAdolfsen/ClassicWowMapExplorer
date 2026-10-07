@@ -676,7 +676,7 @@ export class Viewer {
 				const terrain = this.terrain.heightAt(at.x, at.z);
 				if (!(Math.abs(terrain - at.y) < 1)) {
 					from.set(at.x, at.y + 0.5, at.z);
-					building = this.objects.castBuildings(from, down, 1.5)?.ground ?? null;
+					building = this.objects.castSolid(from, down, 1.5)?.ground ?? null;
 				}
 			}
 			const group = building !== null ? footsteps.groupOf(building) || STONE_GROUND : this.terrain.groundAt(at.x, at.z);
@@ -711,7 +711,7 @@ export class Viewer {
 			const known = holes.get(key);
 			if (known && known.until > now) return known.open;
 			const from = new THREE.Vector3(x, surface + 0.5, z);
-			const open = objects.nearBuilding(from, HOLE_DEPTH) && objects.castBuildings(from, down, HOLE_DEPTH) !== null;
+			const open = objects.nearSolid(from, HOLE_DEPTH) && objects.castSolid(from, down, HOLE_DEPTH) !== null;
 			if (holes.size > 4096) holes.clear();
 			holes.set(key, { open, until: now + 2000 });
 			return open;
@@ -726,8 +726,8 @@ export class Viewer {
 			surface: (x, z) => terrain.surfaceAt(x, z),
 			// A map with no terrain (a dungeon that's one building) is as loaded as it'll get.
 			ready: (x, z) => terrain.detailedAt(x, z) || terrain.surfaceAt(x, z) === -Infinity,
-			nearBuilding: (at, margin) => objects.nearBuilding(at, margin),
-			cast: (from, direction, far) => objects.castBuildings(from, direction, far),
+			nearSolid: (at, margin) => objects.nearSolid(at, margin),
+			cast: (from, direction, far) => objects.castSolid(from, direction, far),
 			sweep: (from, move, radius) => objects.sweep(from, move, radius),
 			pushOut: (at, radius) => objects.pushOut(at, radius, true),
 			liquid: (at) => this.liquidOver(at),
@@ -848,7 +848,7 @@ export class Viewer {
 		// Buildings (and the caves and mines built as buildings) are solid.
 		this.controls.collide = (from, move) => {
 			// Most of the time there's no building anywhere near; skip the ray casts then.
-			if (!this.objects.nearBuilding(from, move.length() + CAMERA_RADIUS)) return move;
+			if (!this.objects.nearSolid(from, move.length() + CAMERA_RADIUS)) return move;
 			const allowed = this.objects.sweep(from, move, CAMERA_RADIUS);
 			return allowed.add(this.objects.pushOut(from.clone().add(allowed), CAMERA_RADIUS));
 		};

@@ -177,9 +177,18 @@ The speeds, the jump and the falling are the game's (the server emulators' const
 second running, 4.5 backpedalling, 4.72 swimming). There's no steering in the air beyond the way you
 jumped. Steps up to a yard high are walked up; ground steeper than 50 degrees (see *Walkable slopes*
 in Highlight) can't be climbed, and you slide down it. Buildings, caves and mines are solid and can be
-walked into, up their stairs and across their floors; trees, fences and other props are not.
+walked into, up their stairs and across their floors. Trees, fences, rocks, crates and other M2
+props are solid where their files contain dedicated collision triangles. Leaves, visual effects
+and props without collision triangles do not become solid just because they are drawn.
 Water deeper than about two thirds of your height is swum in, and a shore climbs out of it. Dungeon
 entrances take you in on foot. Nothing fights back: it's a sandbox.
+
+Prop collision participates in floor queries, wall sliding, the camera and static line-of-sight
+checks. Sphere sweeps account for radius and thin obstacles. Loaded prop collision stays active
+when draw-distance culling hides a model and is removed when its tile placement is unloaded.
+Collision uses the static mesh from the installed build; animated doors, moving prop shapes and
+exact live-client movement parity are not validated. The walkable-slope tint still applies to
+terrain and WMO buildings, not the separate invisible M2 collision meshes.
 
 The Travel menu chooses who walks: the race and sex (those the install has models for), the classic
 or HD model, and the outfit: a Stormwind City Guard's, with sword and shield (the default; guards are
@@ -277,6 +286,10 @@ npm run regions -- [wowDir] [product] [path/to/mangos.sqlite]
 - `npm run dev`: start the dev server
 - `npm run build`: type-check and build to `dist`
 - `npm run typecheck`: type-check only
+- `npm test`: collision parsing, transformed geometry, radius sweeps and object lifecycle checks
+- `npm run probe:collision -- [wowDir] [product] [tileX] [tileY]`: compare prop BVH rays with brute-force
+  triangle queries on an Eastern Kingdoms tile; defaults to Forever and tile 32_48. Writes only
+  counts, model names and diagnostic results to the ignored `.cache` directory, not game geometry.
 - `npm run probe`: inspect game data from Node
 - `npm run spawns`: rebuild the spawn files
 - `npm run regions`: rebuild the regions, flight paths, boats and zeppelins
@@ -285,6 +298,8 @@ npm run regions -- [wowDir] [product] [path/to/mangos.sqlite]
   `tools/portable/launcher.c`, its icon `public/icon.svg`
 
 `inspector.html` is a small test page for browsing the storage and file formats.
+
+See [prop collision validation](docs/prop-collision.md) for evidence and remaining limits.
 
 ### Layout
 

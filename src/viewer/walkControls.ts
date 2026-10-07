@@ -81,11 +81,11 @@ export interface WalkWorld {
 	surface(x: number, z: number): number;
 	/** Whether the terrain there has loaded in full detail. */
 	ready(x: number, z: number): boolean;
-	/** Whether a building's bounds come within margin of a point (else casts can be skipped). */
-	nearBuilding(at: THREE.Vector3, margin: number): boolean;
-	/** Nearest building surface along a ray, within far. */
+	/** Whether loaded solid bounds come within margin of a point (else casts can be skipped). */
+	nearSolid(at: THREE.Vector3, margin: number): boolean;
+	/** Nearest loaded solid surface along a ray, within far. */
 	cast(from: THREE.Vector3, direction: THREE.Vector3, far: number): { distance: number; normal: THREE.Vector3; ground: number } | null;
-	/** A move cut short so it keeps radius from building walls, sliding along them. */
+	/** A move cut short so it keeps radius from solid surfaces, sliding along them. */
 	sweep(from: THREE.Vector3, move: THREE.Vector3, radius: number): THREE.Vector3;
 	/** How far to move a point so no wall is within radius of it horizontally. */
 	pushOut(at: THREE.Vector3, radius: number): THREE.Vector3;
@@ -369,7 +369,7 @@ export class WalkControls {
 		if (t <= top && t >= bottom) best = { y: t, normal: this.terrainNormal(x, z), ground: null };
 		const from = new THREE.Vector3(x, top, z);
 		const reach = top - bottom;
-		if (reach > 0 && world.nearBuilding(from, reach + 1)) {
+		if (reach > 0 && world.nearSolid(from, reach + 1)) {
 			const hit = world.cast(from, DOWN, reach);
 			if (hit && (!best || top - hit.distance > best.y)) {
 				// Two-sided surfaces can be hit from their back: the floor's normal points up either way.
@@ -499,7 +499,7 @@ export class WalkControls {
 		const length = move.length();
 		if (length < 1e-6) return;
 		const middle = p.clone().setY(p.y + this.height * 0.5);
-		if (world.nearBuilding(middle, length + this.height + r)) {
+		if (world.nearSolid(middle, length + this.height + r)) {
 			for (const at of [STEP_UP + 0.1, this.height * 0.5, this.height - 0.1]) {
 				move = world.sweep(p.clone().setY(p.y + Math.max(at, STEP_UP + 0.1)), move, r);
 				move.y = 0;
@@ -621,7 +621,7 @@ export class WalkControls {
 		if (v.y > 0) {
 			// The head hits a ceiling.
 			const head = p.clone().setY(p.y + this.height);
-			if (this.world!.nearBuilding(head, v.y * dt + 1)) {
+			if (this.world!.nearSolid(head, v.y * dt + 1)) {
 				const hit = this.world!.cast(head, UP, v.y * dt + 0.05);
 				if (hit) {
 					y = p.y + Math.max(0, hit.distance - 0.05);
@@ -715,7 +715,7 @@ export class WalkControls {
 		const back = new THREE.Vector3(Math.sin(yaw) * Math.cos(this.pitch), -Math.sin(this.pitch), Math.cos(yaw) * Math.cos(this.pitch));
 		let reach = this.zoom;
 		if (world) {
-			if (world.nearBuilding(target, reach + 1)) {
+			if (world.nearSolid(target, reach + 1)) {
 				const hit = world.cast(target, back, reach + CAMERA_GAP);
 				if (hit) reach = Math.min(reach, hit.distance - CAMERA_GAP);
 			}
