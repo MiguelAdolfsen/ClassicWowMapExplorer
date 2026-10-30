@@ -12,7 +12,7 @@ import type { WdtTile } from '../../src/formats/wdt';
 import {
 	aggroRadiusYd, canonicalJson, readVmangos, cellRowOfNorth, creatureEncounter, displayFromWorld, doodadInVmangosVmap, entryAlternatives, exportArena, factionReaction,
 	localFromWorld, MAP_ORIGIN, markedCells, m2Magic, mh2oCells, northOfCellRow, placementFromWorld, planTiles, reactionsFor, serverObjectVmangosLos,
-	serverObjectYaw, terrainChunkTriangles, tileBox, tilesForBox, transformPoint, TRI, validateSpec, vmapGroupSkipReason, vmapTriangleCollides,
+	serverObjectTilt, serverObjectYaw, terrainChunkTriangles, tileBox, tilesForBox, transformPoint, TRI, validateSpec, vmapGroupSkipReason, vmapTriangleCollides,
 	westOfCellCol, wmoGroupExtras, wmoLiquidTiles, worldBoxOf, worldFromDisplay, worldFromLocal, worldFromPlacement, worldFromSpawnModel, yawOfMatrix,
 	type ArenaSpec, type EncounterAlternative, type Vec3,
 } from '../exportArena';
@@ -223,6 +223,11 @@ test('arena specs are validated and map to the expected world box and tile', () 
 	assert.throws(() => validateSpec({ ...spec, spawn_margin_yd: -1 }), /spawn_margin_yd/);
 	assert.throws(() => validateSpec({ ...spec, encounter_rules: { ...rules, threat_radius_yd: 0 } }), /encounter_rules/);
 	assert.throws(() => validateSpec({ ...spec, encounter_rules: { ...rules, player_level_min: 0 } }), /encounter_rules/);
+	validateSpec({ ...spec, server_object_max_tilt_rad: 0.3 });
+	for (const bad of [0, -0.1, 0.4, Number.NaN]) assert.throws(() => validateSpec({ ...spec, server_object_max_tilt_rad: bad }), /server_object_max_tilt_rad/);
+	validateSpec({ ...spec, server_object_skip: [{ guid: 1177, reason: 'pooled herb node; quaternion yaw differs from orientation' }] });
+	for (const bad of [[], [{ guid: 0, reason: 'x' }], [{ guid: 5, reason: ' ' }], [{ guid: 5, reason: 'a' }, { guid: 5, reason: 'b' }], [{ guid: 1.5, reason: 'x' }]])
+		assert.throws(() => validateSpec({ ...spec, server_object_skip: bad as { guid: number; reason: string }[] }), /server_object_skip/);
 });
 
 const wdtTile = (x: number, y: number, obj0 = 1000 + x, root = 2000 + x): WdtTile => ({ x, y, flags: 0, flowMap: 0, files: { root, obj0, obj1: 0, tex0: 0, lod: 0, mapTexture: 0, mapTextureN: 0, minimap: 0 } });
@@ -577,6 +582,24 @@ test('server object rotation must be the yaw of its orientation (yaw-only quater
 	assert.ok(Math.abs(serverObjectYaw(5, [0, 0, Math.sin(-o / 2), Math.cos(-o / 2)], -o) - (2 * Math.PI - o)) < 1e-12, 'normalised to [0, 2 pi)');
 	assert.throws(() => serverObjectYaw(5, [0, 0, Math.sin(0.4), Math.cos(0.4)], o), /Game object 5/);
 	assert.throws(() => serverObjectYaw(5, [0.1, 0, Math.sin(o / 2), Math.cos(o / 2)], o), /Game object 5/);
+});
+
+test('an opt-in tilt allowance places a slightly tilted object yaw-only and refuses larger tilts', () => {
+	const o = 2.787;
+	// Valley of Trials' Cooking Table (vmangos gameobject 1458): tilt about 0.047 rad, heading equal to its orientation.
+	const table = [0.0047, -0.023, 0.984, 0.1765];
+	assert.throws(() => serverObjectYaw(1458, table, o), /Game object 1458/, 'refused without the allowance');
+	assert.ok(Math.abs(serverObjectYaw(1458, table, o, 0.3) - o) < 1e-12);
+	assert.ok(Math.abs(serverObjectTilt(table) - 0.047) < 2e-3);
+	// A 0.2 rad tilt about the x axis, then a yaw o.
+	const t = 0.2;
+	const tilted = [Math.cos(o / 2) * Math.sin(t / 2), -Math.sin(o / 2) * Math.sin(t / 2), Math.sin(o / 2) * Math.cos(t / 2), Math.cos(o / 2) * Math.cos(t / 2)];
+	assert.ok(Math.abs(serverObjectTilt(tilted) - t) < 1e-9);
+	assert.ok(Math.abs(serverObjectYaw(7, tilted, o, 0.3) - o) < 1e-9);
+	assert.throws(() => serverObjectYaw(7, tilted, o, 0.1), /tilts 0.200 rad/);
+	assert.throws(() => serverObjectYaw(7, tilted, o + 0.5, 0.3), /Game object 7/, 'the heading must still match the orientation');
+	assert.ok(Math.abs(serverObjectYaw(5, [0, 0, Math.sin(o / 2), Math.cos(o / 2)], o, 0.3) - o) < 1e-12, 'yaw-only rotations as before');
+	assert.equal(serverObjectTilt([0, 0, 0, 0]), 0);
 });
 
 test('MH2O instances mark only the cells their exists bitmap sets', () => {

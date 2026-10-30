@@ -308,9 +308,28 @@ export function creatureEncounter(input: EncounterInput, spec: Pick<ArenaSpec, '
  * Yaw of a server-spawned object. Only yaw rotations are supported: the quaternion's x and y must vanish
  * and, unless the quaternion is all zero, its yaw must match the spawn orientation within 0.01 rad.
  * Returns the orientation normalised to [0, 2 pi).
+ *
+ * With maxTiltRad > 0 (opt-in, spec server_object_max_tilt_rad) a rotation that tilts the object's up axis by at
+ * most that angle is accepted and placed with its yaw only: the tilt is dropped, and the yaw is the quaternion's
+ * heading (atan2(2(wz + xy), 1 - 2(y^2 + z^2))), which must still match the spawn orientation within 0.01 rad.
  */
-export function serverObjectYaw(guid: number, rotation: readonly number[], orientation: number): number {
+export function serverObjectTilt(rotation: readonly number[]): number {
 	const [r0, r1, r2, r3] = rotation;
+	const n2 = r0 * r0 + r1 * r1 + r2 * r2 + r3 * r3;
+	if (n2 === 0) return 0;
+	return Math.acos(Math.max(-1, Math.min(1, 1 - (2 * (r0 * r0 + r1 * r1)) / n2)));
+}
+
+export function serverObjectYaw(guid: number, rotation: readonly number[], orientation: number, maxTiltRad = 0): number {
+	const [r0, r1, r2, r3] = rotation;
+	if (maxTiltRad > 0 && (Math.abs(r0) >= 1e-3 || Math.abs(r1) >= 1e-3)) {
+		const tilt = serverObjectTilt(rotation);
+		const n2 = r0 * r0 + r1 * r1 + r2 * r2 + r3 * r3;
+		const heading = Math.atan2(2 * (r3 * r2 + r0 * r1), n2 - 2 * (r1 * r1 + r2 * r2));
+		const headingDelta = Math.abs(Math.atan2(Math.sin(heading - orientation), Math.cos(heading - orientation)));
+		if (tilt > maxTiltRad || headingDelta > 0.01) throw new Error(`Game object ${guid}: rotation ${[r0, r1, r2, r3]} tilts ${tilt.toFixed(3)} rad (allowed ${maxTiltRad}) or is not the yaw ${orientation}; unsupported`);
+		return ((orientation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+	}
 	const yawOnly = Math.abs(r0) < 1e-3 && Math.abs(r1) < 1e-3;
 	const quaternionYaw = 2 * Math.atan2(r2, r3);
 	const yawDelta = Math.abs(Math.atan2(Math.sin(quaternionYaw - orientation), Math.cos(quaternionYaw - orientation)));
@@ -521,6 +540,10 @@ export interface ArenaSpec {
 	/** Creature spawns are exported within the bounds grown by this margin (neighbours that can join a fight). */
 	spawn_margin_yd: number;
 	encounter_rules: EncounterRules;
+	/** Opt-in, at most 0.35: server objects tilted up to this angle are placed yaw-only (serverObjectYaw). Absent: refused. */
+	server_object_max_tilt_rad?: number;
+	/** Opt-in: server objects left out of the geometry, each with a reason (listed in server_gameobjects_without_model); every guid must be in the geometry box. */
+	server_object_skip?: { guid: number; reason: string }[];
 }
 
 export function validateSpec(spec: ArenaSpec): void {
@@ -532,6 +555,12 @@ export function validateSpec(spec: ArenaSpec): void {
 	if (!(spec.bounds_local.x_min < spec.bounds_local.x_max && spec.bounds_local.y_min < spec.bounds_local.y_max)) throw new Error('Arena bounds are empty or reversed');
 	if (spec.margin_yd < 0 || spec.tile_search_margin_yd < spec.margin_yd) throw new Error('Margins must satisfy 0 <= margin <= tile search margin');
 	if (!(Number.isFinite(spec.spawn_margin_yd) && spec.spawn_margin_yd >= 0)) throw new Error('spawn_margin_yd must be finite and >= 0');
+	const tilt = spec.server_object_max_tilt_rad;
+	if (tilt !== undefined && !(typeof tilt === 'number' && tilt > 0 && tilt <= 0.35)) throw new Error('server_object_max_tilt_rad must be a number in (0, 0.35] when present');
+	const skip = spec.server_object_skip;
+	if (skip !== undefined && !(Array.isArray(skip) && skip.length > 0
+		&& skip.every((s) => Number.isInteger(s?.guid) && s.guid > 0 && typeof s.reason === 'string' && s.reason.trim() !== '')
+		&& new Set(skip.map((s) => s.guid)).size === skip.length)) throw new Error('server_object_skip must be a non-empty list of distinct {guid, reason} when present');
 	const rules = spec.encounter_rules;
 	if (!rules || ![rules.threat_radius_yd, rules.leash_extension_timer_s, rules.runner_speed_yd_s].every((v) => Number.isFinite(v) && v > 0)
 		|| !(Number.isInteger(rules.player_level_min) && rules.player_level_min >= 1)) throw new Error('encounter_rules must hold positive finite radii, timer and speed and an integer player_level_min >= 1');
@@ -1142,6 +1171,8 @@ async function exportFromSource(
 		ckey_verified: root.getContentKeys(GAMEOBJECT_DISPLAY_INFO_FDID).map((k) => Buffer.from(k).toString('hex')).includes(displayMd5), encrypted_sections: displayRead.encryptedKeys });
 	const displayInfo = new Db2(displayRead.data);
 	const objectsWithoutModel: Record<string, unknown>[] = [];
+	const objectsSkipped: number[] = [];
+	const skipReasons = new Map((spec.server_object_skip ?? []).map((s) => [s.guid, s.reason]));
 	const gameobjects: Record<string, unknown>[] = [];
 	let serverObjectTriangles = 0;
 	for (const s of spawnData.objects.spawns) {
@@ -1158,11 +1189,18 @@ async function exportFromSource(
 		// Server-spawned objects the client draws and collides with. Yaw-only rotations are supported;
 		// anything else fails the export instead of guessing.
 		if (!pointInBox([north, west], geometryBox)) continue;
+		const skipped = skipReasons.get(guid);
+		if (skipped !== undefined) {
+			objectsSkipped.push(guid);
+			objectsWithoutModel.push({ guid, entry, name: template[0] ?? null, display_id: displayId, reason: `skipped by spec server_object_skip: ${skipped}` });
+			continue;
+		}
 		if (!modelFdid) {
 			objectsWithoutModel.push({ guid, entry, name: template[0] ?? null, display_id: displayId, reason: displayInfo.has(displayId) ? 'display has no model file' : 'display id not in GameObjectDisplayInfo' });
 			continue;
 		}
-		const yaw = serverObjectYaw(guid, [r0, r1, r2, r3], orientation);
+		const yaw = serverObjectYaw(guid, [r0, r1, r2, r3], orientation, spec.server_object_max_tilt_rad ?? 0);
+		const tiltDropped = Math.abs(r0) >= 1e-3 || Math.abs(r1) >= 1e-3 ? serverObjectTilt([r0, r1, r2, r3]) : 0;
 		const go = vm.objects.get(guid)!;
 		if (go.type !== type) throw new Error(`Game object ${guid}: map0.json type ${type} != vmangos gameobject_template type ${go.type}`);
 		const model = await loadModel(modelFdid);
@@ -1174,13 +1212,15 @@ async function exportFromSource(
 			for (let k = 0; k < indices.length; k += 3) kept.push([world(indices[k]), world(indices[k + 1]), world(indices[k + 2]), k / 3]);
 		}
 		const index = addSource({ key: `gameobject/guid${guid}`, kind: 'server_gameobject', guid, entry, gameobject_type: type, display_id: displayId, fdid: modelFdid, model_name: model.name,
-			origin_world: { north, west, up }, yaw_world_rad: yaw, scale, solid: model.collision !== null, collision_triangles: kept.length,
+			origin_world: { north, west, up }, yaw_world_rad: yaw, ...(tiltDropped ? { tilt_dropped_rad: tiltDropped } : {}), scale, solid: model.collision !== null, collision_triangles: kept.length,
 			gameobject_state: go.state, vmangos_los: los, pool_entry: go.pool ? go.pool.entry : null, collision: go.pool ? 'conditional-pool' : 'permanent',
 			provenance: 'VMaNGOS gameobject spawn (server data), model from client GameObjectDisplayInfo' });
 		const objectFlags = TRI.SERVER_GAMEOBJECT | TRI.MOVEMENT_SOLID | (los.blocks_unit_los ? TRI.SERVER_LOS_BLOCKER : 0) | (go.pool ? TRI.CONDITIONAL_POOL : 0);
 		for (const [a, b, c, local] of kept) mesh.add(a, b, c, objectFlags, index, local);
 		serverObjectTriangles += kept.length;
 	}
+	const missingSkips = [...skipReasons.keys()].filter((g) => !objectsSkipped.includes(g));
+	if (missingSkips.length) throw new Error(`server_object_skip names game objects outside the geometry box: ${missingSkips.join(', ')}`);
 	const safeLocs: Record<string, unknown>[] = [];
 	let safeLocsRecord: Record<string, unknown> | null = null;
 	if (args.safeLocs) {
